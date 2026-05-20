@@ -27,6 +27,47 @@ router.get("/", requireAuth, async (req, res) => {
   }
 });
 
+// PATCH /api/notifications/:id — mark single as read
+router.patch("/:id", requireAuth, async (req, res) => {
+  try {
+    const conn = await dbConnect();
+    if (conn.isMock) {
+      const db = getMockDb();
+      db.notifications = db.notifications.map((n) =>
+        n._id === req.params.id && n.userId === req.user.id ? { ...n, read: true } : n
+      );
+      saveMockDb(db);
+    } else {
+      await Notification.findOneAndUpdate(
+        { _id: req.params.id, userId: req.user.id },
+        { $set: { read: true } }
+      );
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to update notification." });
+  }
+});
+
+// DELETE /api/notifications/:id — delete single notification
+router.delete("/:id", requireAuth, async (req, res) => {
+  try {
+    const conn = await dbConnect();
+    if (conn.isMock) {
+      const db = getMockDb();
+      db.notifications = db.notifications.filter(
+        (n) => !(n._id === req.params.id && n.userId === req.user.id)
+      );
+      saveMockDb(db);
+    } else {
+      await Notification.findOneAndDelete({ _id: req.params.id, userId: req.user.id });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to delete notification." });
+  }
+});
+
 // PATCH /api/notifications  — mark all as read
 router.patch("/", requireAuth, async (req, res) => {
   try {
