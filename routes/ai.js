@@ -17,40 +17,58 @@ router.post("/chat", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "Messages payload is required." });
     }
 
-    const conversation = messages?.length > 0
+    // Build conversation — prefer full messages array for session memory,
+    // fall back to single message
+    let conversation = messages?.length > 0
       ? messages
       : [{ role: "user", content: message }];
 
+    // Keep last 20 messages max to avoid token bloat while preserving context
+    if (conversation.length > 20) {
+      conversation = conversation.slice(-20);
+    }
+
+    // Ensure the last message is from the user
+    const lastMsg = conversation[conversation.length - 1];
+    if (!lastMsg || (lastMsg.role !== "user" && lastMsg.role !== "human")) {
+      return res.status(400).json({ error: "Last message must be from the user." });
+    }
+
     const responseText = await chatWithGemini(conversation);
 
-    const conn = await dbConnect();
-    const newUserMsg = conversation[conversation.length - 1];
-
-    if (conn.isMock) {
-      const db = getMockDb();
-      let history = db.chatHistories.find((c) => c.userId === req.user.id);
-      if (!history) {
-        history = { _id: "chat_" + Math.random().toString(36).substr(2, 9), userId: req.user.id, messages: [], createdAt: new Date().toISOString() };
-        db.chatHistories.push(history);
-      }
-      history.messages.push(
-        { role: newUserMsg.role, content: newUserMsg.content, timestamp: newUserMsg.timestamp || new Date().toISOString() },
-        { role: "model", content: responseText, timestamp: new Date().toISOString() }
-      );
-      history.updatedAt = new Date().toISOString();
-      saveMockDb(db);
-    } else {
-      await ChatHistory.findOneAndUpdate(
-        { userId: req.user.id },
-        { $push: { messages: [{ role: newUserMsg.role, content: newUserMsg.content }, { role: "model", content: responseText }] } },
-        { upsert: true, new: true }
-      );
+    if (!responseText) {
+      return res.status(502).json({ error: "AI returned an empty response. Please try again." });
     }
+
+    // Persist to DB asynchronously — don't block the response
+    const newUserMsg = conversation[conversation.length - 1];
+    dbConnect().then((conn) => {
+      if (conn.isMock) {
+        const db = getMockDb();
+        let history = db.chatHistories.find((c) => c.userId === req.user.id);
+        if (!history) {
+          history = { _id: "chat_" + Math.random().toString(36).substr(2, 9), userId: req.user.id, messages: [], createdAt: new Date().toISOString() };
+          db.chatHistories.push(history);
+        }
+        history.messages.push(
+          { role: "user", content: newUserMsg.content, timestamp: new Date().toISOString() },
+          { role: "model", content: responseText, timestamp: new Date().toISOString() }
+        );
+        history.updatedAt = new Date().toISOString();
+        saveMockDb(db);
+      } else {
+        ChatHistory.findOneAndUpdate(
+          { userId: req.user.id },
+          { $push: { messages: [{ role: "user", content: newUserMsg.content }, { role: "model", content: responseText }] } },
+          { upsert: true, new: true }
+        ).catch((e) => console.error("Chat history save error:", e));
+      }
+    }).catch((e) => console.error("DB connect error during chat save:", e));
 
     res.json({ success: true, response: responseText });
   } catch (err) {
     console.error("AI Chat Error:", err);
-    res.status(500).json({ error: "AI failed to respond." });
+    res.status(500).json({ error: "AI failed to respond. Please try again." });
   }
 });
 
