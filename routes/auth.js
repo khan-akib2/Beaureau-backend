@@ -112,7 +112,10 @@ router.get("/me", requireAuth, async (req, res) => {
       user = await User.findById(req.user.id).select("-password");
     }
 
-    if (!user) return res.status(404).json({ error: "User not found." });
+    if (!user) {
+      res.clearCookie("bureau_token", { path: "/" });
+      return res.status(404).json({ error: "User not found." });
+    }
 
     return res.json({
       success: true,
@@ -202,6 +205,40 @@ router.post("/google", async (req, res) => {
   } catch (err) {
     console.error("Google Auth Error:", err);
     res.status(500).json({ error: "Google Authentication failed." });
+  }
+});
+
+// POST /api/auth/make-admin  — dev utility: promote any user to admin by email
+// Remove this route before going to production
+router.post("/make-admin", async (req, res) => {
+  try {
+    const { email, secret } = req.body;
+    if (secret !== (process.env.ADMIN_SECRET || "bureau-admin-2026")) {
+      return res.status(403).json({ error: "Invalid secret." });
+    }
+    if (!email) return res.status(400).json({ error: "Email is required." });
+
+    const conn = await dbConnect();
+
+    if (conn.isMock) {
+      const db = getMockDb();
+      const idx = db.users.findIndex((u) => u.email === email.toLowerCase());
+      if (idx === -1) return res.status(404).json({ error: "User not found." });
+      db.users[idx].role = "admin";
+      saveMockDb(db);
+      return res.json({ success: true, message: `${email} is now an admin.` });
+    }
+
+    const user = await User.findOneAndUpdate(
+      { email: email.toLowerCase() },
+      { $set: { role: "admin" } },
+      { new: true }
+    );
+    if (!user) return res.status(404).json({ error: "User not found." });
+    return res.json({ success: true, message: `${email} is now an admin.` });
+  } catch (err) {
+    console.error("Make Admin Error:", err);
+    res.status(500).json({ error: "Internal server error." });
   }
 });
 

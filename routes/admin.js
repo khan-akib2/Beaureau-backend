@@ -61,18 +61,107 @@ router.get("/users", requireAdmin, async (req, res) => {
   try {
     const conn = await dbConnect();
     let users = [];
-
     if (conn.isMock) {
       const db = getMockDb();
       users = db.users.map(({ password, ...u }) => u);
     } else {
       users = await User.find({}).select("-password").sort({ createdAt: -1 });
     }
-
     res.json({ success: true, users });
   } catch (err) {
-    console.error("Admin Users Error:", err);
     res.status(500).json({ error: "Failed to fetch users." });
+  }
+});
+
+// PATCH /api/admin/users — toggle role
+router.patch("/users", requireAdmin, async (req, res) => {
+  try {
+    const { userId, role } = req.body;
+    if (!userId || !role) return res.status(400).json({ error: "userId and role required." });
+    const conn = await dbConnect();
+    if (conn.isMock) {
+      const db = getMockDb();
+      const idx = db.users.findIndex(u => u._id === userId);
+      if (idx === -1) return res.status(404).json({ error: "User not found." });
+      db.users[idx].role = role;
+      saveMockDb(db);
+      return res.json({ success: true });
+    }
+    await User.findByIdAndUpdate(userId, { $set: { role } });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to update role." });
+  }
+});
+
+// DELETE /api/admin/users?userId=xxx
+router.delete("/users", requireAdmin, async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ error: "userId required." });
+    const conn = await dbConnect();
+    if (conn.isMock) {
+      const db = getMockDb();
+      const before = db.users.length;
+      db.users = db.users.filter(u => u._id !== userId);
+      if (db.users.length === before) return res.status(404).json({ error: "User not found." });
+      saveMockDb(db);
+      return res.json({ success: true });
+    }
+    await User.findByIdAndDelete(userId);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to delete user." });
+  }
+});
+
+// PATCH /api/admin/documents — update doc status
+router.patch("/documents", requireAdmin, async (req, res) => {
+  try {
+    const { documentId, status } = req.body;
+    if (!documentId || !status) return res.status(400).json({ error: "documentId and status required." });
+    const conn = await dbConnect();
+    if (conn.isMock) {
+      const db = getMockDb();
+      const idx = db.uploadedDocuments.findIndex(d => d._id === documentId);
+      if (idx === -1) return res.status(404).json({ error: "Document not found." });
+      db.uploadedDocuments[idx].status = status;
+      saveMockDb(db);
+      return res.json({ success: true });
+    }
+    await UploadedDocument.findByIdAndUpdate(documentId, { $set: { status } });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to update document." });
+  }
+});
+
+// PATCH /api/admin/applications — update status, progress, push timeline
+router.patch("/applications", requireAdmin, async (req, res) => {
+  try {
+    const { applicationId, status, progress, timelineDescription } = req.body;
+    if (!applicationId) return res.status(400).json({ error: "applicationId required." });
+    const conn = await dbConnect();
+    const newEntry = { status, description: timelineDescription, date: new Date().toISOString() };
+    if (conn.isMock) {
+      const db = getMockDb();
+      const idx = db.applications.findIndex(a => a._id === applicationId);
+      if (idx === -1) return res.status(404).json({ error: "Application not found." });
+      db.applications[idx].status = status;
+      db.applications[idx].progress = progress;
+      db.applications[idx].timeline = [...(db.applications[idx].timeline || []), newEntry];
+      saveMockDb(db);
+      return res.json({ success: true, application: db.applications[idx] });
+    }
+    const app = await Application.findByIdAndUpdate(
+      applicationId,
+      { $set: { status, progress }, $push: { timeline: newEntry } },
+      { new: true }
+    );
+    if (!app) return res.status(404).json({ error: "Application not found." });
+    res.json({ success: true, application: app });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to update application." });
   }
 });
 
