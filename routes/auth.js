@@ -336,9 +336,8 @@ router.patch("/me", requireAuth, async (req, res) => {
     } = req.body;
 
     if (password) {
-      const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*(),.?":{}|<>]).{8,}$/;
-      if (!passwordRegex.test(password)) {
-        return res.status(400).json({ error: "Password must be at least 8 characters and contain uppercase, lowercase, numbers, and special characters." });
+      if (password.length < 8) {
+        return res.status(400).json({ error: "Password must be at least 8 characters." });
       }
     }
 
