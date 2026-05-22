@@ -1,4 +1,5 @@
 import express from "express";
+import mongoose from "mongoose";
 import dbConnect, { getMockDb, saveMockDb } from "../lib/db.js";
 import Application from "../models/Application.js";
 import Notification from "../models/Notification.js";
@@ -10,9 +11,10 @@ const router = express.Router();
 router.get("/", requireAuth, async (req, res) => {
   try {
     const conn = await dbConnect();
+    const isRealObjectId = mongoose.Types.ObjectId.isValid(req.user.id);
     let applications = [];
 
-    if (conn.isMock) {
+    if (conn.isMock || !isRealObjectId) {
       const db = getMockDb();
       applications = req.user.role === "admin"
         ? db.applications

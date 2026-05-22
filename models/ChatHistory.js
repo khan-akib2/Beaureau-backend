@@ -2,7 +2,8 @@ import mongoose from "mongoose";
 
 const ChatHistorySchema = new mongoose.Schema(
   {
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    userId: { type: String, required: true }, // Compatible with both ObjectId and mock user ID strings
+    title: { type: String, default: "New Conversation" },
     messages: {
       type: [
         {

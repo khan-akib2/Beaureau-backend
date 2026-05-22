@@ -1,12 +1,15 @@
 import express from "express";
+import mongoose from "mongoose";
 import multer from "multer";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 import dbConnect, { getMockDb, saveMockDb } from "../lib/db.js";
 import UploadedDocument from "../models/UploadedDocument.js";
 import Notification from "../models/Notification.js";
 import { requireAuth } from "../lib/auth.js";
-import { analyzeDocument } from "../lib/gemini.js";
+import { analyzeDocumentWithGroq } from "../lib/groq.js";
+import { uploadToCloudinary } from "../lib/cloudinary.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const router = express.Router();
@@ -25,9 +28,10 @@ const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } });
 router.get("/", requireAuth, async (req, res) => {
   try {
     const conn = await dbConnect();
+    const isRealObjectId = mongoose.Types.ObjectId.isValid(req.user.id);
     let documents = [];
 
-    if (conn.isMock) {
+    if (conn.isMock || !isRealObjectId) {
       const db = getMockDb();
       documents = req.user.role === "admin" ? db.uploadedDocuments : db.uploadedDocuments.filter((d) => d.userId === req.user.id);
     } else {
@@ -50,26 +54,39 @@ router.post("/", requireAuth, upload.single("file"), async (req, res) => {
     const fileName = req.file?.originalname || req.body.fileName;
     const fileSize = req.file?.size || Number(req.body.fileSize);
     const fileType = req.file?.mimetype || req.body.fileType;
-    const fileUrl = req.file
-      ? `/uploads/${req.file.filename}`
-      : req.body.fileUrl || `https://source.unsplash.com/random/800x600/?document&sig=${Date.now()}`;
+    let fileUrl = req.body.fileUrl || `https://source.unsplash.com/random/800x600/?document&sig=${Date.now()}`;
 
     if (!fileName || !fileSize || !fileType) {
+      if (req.file) {
+        try { fs.unlinkSync(req.file.path); } catch (e) {}
+      }
       return res.status(400).json({ error: "File metadata is incomplete." });
     }
 
-    const analysis = await analyzeDocument(fileName, fileType);
+    if (req.file) {
+      try {
+        const uploadResult = await uploadToCloudinary(req.file.path);
+        fileUrl = uploadResult.secure_url;
+        try { fs.unlinkSync(req.file.path); } catch (e) {}
+      } catch (uploadErr) {
+        console.error("Cloudinary upload error:", uploadErr);
+        try { fs.unlinkSync(req.file.path); } catch (e) {}
+        return res.status(500).json({ error: "Failed to upload document to cloud storage." });
+      }
+    }
+
+    const analysis = await analyzeDocumentWithGroq(fileName, fileType, fileSize);
     const conn = await dbConnect();
     let newDoc = null;
 
     if (conn.isMock) {
       const db = getMockDb();
-      newDoc = { _id: "doc_" + Math.random().toString(36).substr(2, 9), userId: req.user.id, fileName, fileSize, fileType, fileUrl, summary: analysis.summary, suggestions: analysis.suggestions, missingRequirements: analysis.missingRequirements, status: analysis.status, createdAt: new Date().toISOString() };
+      newDoc = { _id: "doc_" + Math.random().toString(36).substr(2, 9), userId: req.user.id, fileName, fileSize, fileType, fileUrl, summary: analysis.summary, documentType: analysis.documentType, issuingAuthority: analysis.issuingAuthority, suggestions: analysis.suggestions, missingRequirements: analysis.missingRequirements, status: analysis.status, createdAt: new Date().toISOString() };
       db.uploadedDocuments.push(newDoc);
       db.notifications.push({ _id: "notif_" + Math.random().toString(36).substr(2, 9), userId: req.user.id, title: `Document Uploaded: ${fileName}`, message: `Status: ${analysis.status.toUpperCase()}`, type: analysis.status === "verified" ? "success" : "warning", read: false, createdAt: new Date().toISOString() });
       saveMockDb(db);
     } else {
-      newDoc = await UploadedDocument.create({ userId: req.user.id, fileName, fileSize, fileType, fileUrl, summary: analysis.summary, suggestions: analysis.suggestions, missingRequirements: analysis.missingRequirements, status: analysis.status });
+      newDoc = await UploadedDocument.create({ userId: req.user.id, fileName, fileSize, fileType, fileUrl, summary: analysis.summary, documentType: analysis.documentType, issuingAuthority: analysis.issuingAuthority, suggestions: analysis.suggestions, missingRequirements: analysis.missingRequirements, status: analysis.status });
       await Notification.create({ userId: req.user.id, title: `Document Uploaded: ${fileName}`, message: `Status: ${analysis.status.toUpperCase()}`, type: analysis.status === "verified" ? "success" : "warning" });
     }
 

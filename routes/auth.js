@@ -1,7 +1,9 @@
 import express from "express";
+import mongoose from "mongoose";
 import dbConnect, { getMockDb, saveMockDb } from "../lib/db.js";
 import User from "../models/User.js";
 import { hashPassword, verifyPassword, signToken, requireAuth } from "../lib/auth.js";
+import { sendOtpEmail } from "../lib/email.js";
 
 const router = express.Router();
 
@@ -22,35 +24,70 @@ router.post("/register", async (req, res) => {
     }
 
     const conn = await dbConnect();
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otpExpires = new Date(Date.now() + 10 * 60 * 1000);
 
     if (conn.isMock) {
       const db = getMockDb();
-      if (db.users.find((u) => u.email === email.toLowerCase())) {
+      const existingUser = db.users.find((u) => u.email === email.toLowerCase());
+      if (existingUser && existingUser.isVerified !== false) {
         return res.status(400).json({ error: "A user with this email already exists." });
       }
+      
       const hashedPassword = await hashPassword(password);
-      const newUser = {
-        _id: "user_" + Math.random().toString(36).substr(2, 9),
-        name, email: email.toLowerCase(), password: hashedPassword,
-        role: "user",
-        avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(name)}`,
-        createdAt: new Date().toISOString(),
-      };
-      db.users.push(newUser);
+      if (existingUser) {
+        existingUser.name = name;
+        existingUser.password = hashedPassword;
+        existingUser.otp = otp;
+        existingUser.otpExpires = otpExpires.toISOString();
+        existingUser.isVerified = false;
+      } else {
+        const newUser = {
+          _id: "user_" + Math.random().toString(36).substr(2, 9),
+          name,
+          email: email.toLowerCase(),
+          password: hashedPassword,
+          role: "user",
+          avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(name)}`,
+          createdAt: new Date().toISOString(),
+          isVerified: false,
+          otp,
+          otpExpires: otpExpires.toISOString(),
+        };
+        db.users.push(newUser);
+      }
       saveMockDb(db);
-      const token = signToken({ id: newUser._id, email: newUser.email, name: newUser.name, role: newUser.role });
-      res.cookie("bureau_token", token, COOKIE_OPTS);
-      return res.json({ success: true, user: { id: newUser._id, name: newUser.name, email: newUser.email, role: newUser.role, avatar: newUser.avatar } });
+      await sendOtpEmail(email.toLowerCase(), name, otp);
+      return res.json({ success: true, message: "Verification code sent to email.", email: email.toLowerCase() });
     }
 
-    if (await User.findOne({ email: email.toLowerCase() })) {
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
+    if (existingUser && existingUser.isVerified !== false) {
       return res.status(400).json({ error: "A user with this email already exists." });
     }
+
     const hashedPassword = await hashPassword(password);
-    const newUser = await User.create({ name, email: email.toLowerCase(), password: hashedPassword, role: "user" });
-    const token = signToken({ id: newUser._id, email: newUser.email, name: newUser.name, role: newUser.role });
-    res.cookie("bureau_token", token, COOKIE_OPTS);
-    return res.json({ success: true, user: { id: newUser._id, name: newUser.name, email: newUser.email, role: newUser.role, avatar: newUser.avatar } });
+    if (existingUser) {
+      existingUser.name = name;
+      existingUser.password = hashedPassword;
+      existingUser.otp = otp;
+      existingUser.otpExpires = otpExpires;
+      existingUser.isVerified = false;
+      await existingUser.save();
+    } else {
+      await User.create({
+        name,
+        email: email.toLowerCase(),
+        password: hashedPassword,
+        role: "user",
+        isVerified: false,
+        otp,
+        otpExpires,
+      });
+    }
+
+    await sendOtpEmail(email.toLowerCase(), name, otp);
+    return res.json({ success: true, message: "Verification code sent to email.", email: email.toLowerCase() });
   } catch (err) {
     console.error("Register Error:", err);
     res.status(500).json({ error: "Internal server error." });
@@ -78,17 +115,131 @@ router.post("/login", async (req, res) => {
     const isMatch = await verifyPassword(password, user.password);
     if (!isMatch) return res.status(401).json({ error: "Invalid email or password." });
 
+    // Handle email verification block
+    if (user.isVerified === false) {
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      const otpExpires = new Date(Date.now() + 10 * 60 * 1000);
+      
+      if (conn.isMock) {
+        const db = getMockDb();
+        const idx = db.users.findIndex((u) => u.email === email.toLowerCase());
+        db.users[idx].otp = otp;
+        db.users[idx].otpExpires = otpExpires.toISOString();
+        saveMockDb(db);
+      } else {
+        user.otp = otp;
+        user.otpExpires = otpExpires;
+        await user.save();
+      }
+
+      await sendOtpEmail(user.email, user.name, otp);
+
+      return res.status(400).json({
+        error: "Your email address is unverified. A new verification code has been sent.",
+        requiresVerification: true,
+        email: user.email,
+      });
+    }
+
     const token = signToken({ id: user._id || user.id, email: user.email, name: user.name, role: user.role });
     res.cookie("bureau_token", token, COOKIE_OPTS);
     return res.json({
       success: true,
       user: {
         id: user._id || user.id, name: user.name, email: user.email, role: user.role,
+        phone: user.phone || "",
         avatar: user.avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(user.name)}`,
       },
     });
   } catch (err) {
     console.error("Login Error:", err);
+    res.status(500).json({ error: "Internal server error." });
+  }
+});
+
+// POST /api/auth/verify-otp
+router.post("/verify-otp", async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+    if (!email || !otp) return res.status(400).json({ error: "Email and code are required." });
+
+    const conn = await dbConnect();
+
+    if (conn.isMock) {
+      const db = getMockDb();
+      const user = db.users.find((u) => u.email === email.toLowerCase());
+      if (!user) return res.status(404).json({ error: "User not found." });
+
+      const dbOtpExpires = new Date(user.otpExpires).getTime();
+      if (user.otp !== otp || dbOtpExpires < Date.now()) {
+        return res.status(400).json({ error: "Invalid or expired verification code." });
+      }
+
+      user.isVerified = true;
+      user.otp = "";
+      saveMockDb(db);
+
+      const token = signToken({ id: user._id, email: user.email, name: user.name, role: user.role });
+      res.cookie("bureau_token", token, COOKIE_OPTS);
+      return res.json({ success: true, user: { id: user._id, name: user.name, email: user.email, role: user.role, avatar: user.avatar } });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) return res.status(404).json({ error: "User not found." });
+
+    if (user.otp !== otp || user.otpExpires.getTime() < Date.now()) {
+      return res.status(400).json({ error: "Invalid or expired verification code." });
+    }
+
+    user.isVerified = true;
+    user.otp = "";
+    await user.save();
+
+    const token = signToken({ id: user._id, email: user.email, name: user.name, role: user.role });
+    res.cookie("bureau_token", token, COOKIE_OPTS);
+    return res.json({ success: true, user: { id: user._id, name: user.name, email: user.email, role: user.role, avatar: user.avatar } });
+  } catch (err) {
+    console.error("Verify OTP Error:", err);
+    res.status(500).json({ error: "Internal server error." });
+  }
+});
+
+// POST /api/auth/resend-otp
+router.post("/resend-otp", async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: "Email is required." });
+
+    const conn = await dbConnect();
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otpExpires = new Date(Date.now() + 10 * 60 * 1000);
+
+    if (conn.isMock) {
+      const db = getMockDb();
+      const user = db.users.find((u) => u.email === email.toLowerCase());
+      if (!user) return res.status(404).json({ error: "User not found." });
+      if (user.isVerified === true) return res.status(400).json({ error: "Email is already verified." });
+
+      user.otp = otp;
+      user.otpExpires = otpExpires.toISOString();
+      saveMockDb(db);
+
+      await sendOtpEmail(user.email, user.name, otp);
+      return res.json({ success: true, message: "Verification code resent." });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) return res.status(404).json({ error: "User not found." });
+    if (user.isVerified === true) return res.status(400).json({ error: "Email is already verified." });
+
+    user.otp = otp;
+    user.otpExpires = otpExpires;
+    await user.save();
+
+    await sendOtpEmail(user.email, user.name, otp);
+    return res.json({ success: true, message: "Verification code resent." });
+  } catch (err) {
+    console.error("Resend OTP Error:", err);
     res.status(500).json({ error: "Internal server error." });
   }
 });
@@ -105,7 +256,11 @@ router.get("/me", requireAuth, async (req, res) => {
     const conn = await dbConnect();
     let user = null;
 
-    if (conn.isMock) {
+    // If ID is not a valid MongoDB ObjectId (e.g. mock string like 'user_demo_123'),
+    // always use the mock DB lookup regardless of connection state.
+    const isRealObjectId = mongoose.Types.ObjectId.isValid(req.user.id);
+
+    if (conn.isMock || !isRealObjectId) {
       const db = getMockDb();
       user = db.users.find((u) => u._id === req.user.id);
     } else {
@@ -121,7 +276,10 @@ router.get("/me", requireAuth, async (req, res) => {
       success: true,
       user: {
         id: user._id || user.id, name: user.name, email: user.email, role: user.role,
+        phone: user.phone || "",
         avatar: user.avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(user.name)}`,
+        language: user.language || "en",
+        isVerified: user.isVerified || false,
       },
     });
   } catch (err) {
@@ -133,10 +291,13 @@ router.get("/me", requireAuth, async (req, res) => {
 // PATCH /api/auth/me  — update profile
 router.patch("/me", requireAuth, async (req, res) => {
   try {
-    const { name, email, phone, password, avatar } = req.body;
+    const { name, email, phone, password, avatar, language } = req.body;
     const conn = await dbConnect();
 
-    if (conn.isMock) {
+    // Guard: if the token carries a non-ObjectId ID (old mock token), use mock DB.
+    const isRealObjectId = mongoose.Types.ObjectId.isValid(req.user.id);
+
+    if (conn.isMock || !isRealObjectId) {
       const db = getMockDb();
       const idx = db.users.findIndex((u) => u._id === req.user.id);
       if (idx === -1) return res.status(404).json({ error: "User not found." });
@@ -144,10 +305,11 @@ router.patch("/me", requireAuth, async (req, res) => {
       if (email) db.users[idx].email = email.toLowerCase();
       if (phone) db.users[idx].phone = phone;
       if (avatar) db.users[idx].avatar = avatar;
+      if (language) db.users[idx].language = language;
       if (password) db.users[idx].password = await hashPassword(password);
       saveMockDb(db);
       const u = db.users[idx];
-      return res.json({ success: true, user: { id: u._id, name: u.name, email: u.email, role: u.role, avatar: u.avatar } });
+      return res.json({ success: true, user: { id: u._id, name: u.name, email: u.email, role: u.role, phone: u.phone || "", avatar: u.avatar, language: u.language || "en", isVerified: u.isVerified || false } });
     }
 
     const updates = {};
@@ -155,10 +317,12 @@ router.patch("/me", requireAuth, async (req, res) => {
     if (email) updates.email = email.toLowerCase();
     if (phone) updates.phone = phone;
     if (avatar) updates.avatar = avatar;
+    if (language) updates.language = language;
     if (password) updates.password = await hashPassword(password);
 
     const updated = await User.findByIdAndUpdate(req.user.id, { $set: updates }, { new: true }).select("-password");
-    return res.json({ success: true, user: { id: updated._id, name: updated.name, email: updated.email, role: updated.role, avatar: updated.avatar } });
+    if (!updated) return res.status(404).json({ error: "User not found in database." });
+    return res.json({ success: true, user: { id: updated._id, name: updated.name, email: updated.email, role: updated.role, phone: updated.phone || "", avatar: updated.avatar, language: updated.language || "en", isVerified: updated.isVerified || false } });
   } catch (err) {
     console.error("PATCH Me Error:", err);
     res.status(500).json({ error: "Internal server error." });
@@ -190,13 +354,27 @@ router.post("/google", async (req, res) => {
       const db = getMockDb();
       user = db.users.find((u) => u.email === email.toLowerCase());
       if (!user) {
-        user = { _id: "user_" + Math.random().toString(36).substr(2, 9), name, email: email.toLowerCase(), password: "google_sso", role: "user", avatar, createdAt: new Date().toISOString() };
+        user = { _id: "user_" + Math.random().toString(36).substr(2, 9), name, email: email.toLowerCase(), password: "google_sso", role: "user", avatar, createdAt: new Date().toISOString(), isVerified: true };
         db.users.push(user);
         saveMockDb(db);
+      } else {
+        if (user.isVerified !== true) {
+          user.isVerified = true;
+          user.otp = "";
+          saveMockDb(db);
+        }
       }
     } else {
       user = await User.findOne({ email: email.toLowerCase() });
-      if (!user) user = await User.create({ name, email: email.toLowerCase(), password: "google_sso", role: "user", avatar });
+      if (!user) {
+        user = await User.create({ name, email: email.toLowerCase(), password: "google_sso", role: "user", avatar, isVerified: true });
+      } else {
+        if (user.isVerified !== true) {
+          user.isVerified = true;
+          user.otp = "";
+          await user.save();
+        }
+      }
     }
 
     const token = signToken({ id: user._id || user.id, email: user.email, name: user.name, role: user.role });

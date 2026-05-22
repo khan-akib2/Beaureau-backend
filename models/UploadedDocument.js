@@ -8,6 +8,8 @@ const UploadedDocumentSchema = new mongoose.Schema(
     fileUrl: { type: String, required: true },
     fileType: { type: String, required: true },
     summary: { type: String, default: "" },
+    documentType: { type: String, default: "Government Document" },
+    issuingAuthority: { type: String, default: "" },
     suggestions: { type: [String], default: [] },
     missingRequirements: { type: [String], default: [] },
     status: { type: String, enum: ["verified", "incomplete", "pending"], default: "pending" },

@@ -1,4 +1,5 @@
 import express from "express";
+import mongoose from "mongoose";
 import dbConnect, { getMockDb, saveMockDb } from "../lib/db.js";
 import Notification from "../models/Notification.js";
 import { requireAuth } from "../lib/auth.js";
@@ -9,9 +10,10 @@ const router = express.Router();
 router.get("/", requireAuth, async (req, res) => {
   try {
     const conn = await dbConnect();
+    const isRealObjectId = mongoose.Types.ObjectId.isValid(req.user.id);
     let notifications = [];
 
-    if (conn.isMock) {
+    if (conn.isMock || !isRealObjectId) {
       const db = getMockDb();
       notifications = db.notifications
         .filter((n) => n.userId === req.user.id)
@@ -31,7 +33,9 @@ router.get("/", requireAuth, async (req, res) => {
 router.patch("/:id", requireAuth, async (req, res) => {
   try {
     const conn = await dbConnect();
-    if (conn.isMock) {
+    const isRealObjectId = mongoose.Types.ObjectId.isValid(req.user.id);
+
+    if (conn.isMock || !isRealObjectId) {
       const db = getMockDb();
       db.notifications = db.notifications.map((n) =>
         n._id === req.params.id && n.userId === req.user.id ? { ...n, read: true } : n
@@ -53,7 +57,9 @@ router.patch("/:id", requireAuth, async (req, res) => {
 router.delete("/:id", requireAuth, async (req, res) => {
   try {
     const conn = await dbConnect();
-    if (conn.isMock) {
+    const isRealObjectId = mongoose.Types.ObjectId.isValid(req.user.id);
+
+    if (conn.isMock || !isRealObjectId) {
       const db = getMockDb();
       db.notifications = db.notifications.filter(
         (n) => !(n._id === req.params.id && n.userId === req.user.id)
@@ -72,8 +78,9 @@ router.delete("/:id", requireAuth, async (req, res) => {
 router.patch("/", requireAuth, async (req, res) => {
   try {
     const conn = await dbConnect();
+    const isRealObjectId = mongoose.Types.ObjectId.isValid(req.user.id);
 
-    if (conn.isMock) {
+    if (conn.isMock || !isRealObjectId) {
       const db = getMockDb();
       db.notifications = db.notifications.map((n) =>
         n.userId === req.user.id ? { ...n, read: true } : n
