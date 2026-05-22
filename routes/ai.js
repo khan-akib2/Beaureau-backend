@@ -4,7 +4,7 @@ import dbConnect, { getMockDb, saveMockDb } from "../lib/db.js";
 import ChatHistory from "../models/ChatHistory.js";
 import EligibilityCheck from "../models/EligibilityCheck.js";
 import { requireAuth } from "../lib/auth.js";
-import { chatWithGemini, translateLegalText, checkEligibility, generateSchemeGuide } from "../lib/gemini.js";
+import { chatWithGemini, translateLegalText, checkEligibility, generateSchemeGuide, generateChatTitle } from "../lib/gemini.js";
 
 const router = express.Router();
 
@@ -97,7 +97,7 @@ router.get("/chat/:id", requireAuth, async (req, res) => {
 // POST /api/ai/chat/:id  — send user message to specific session, get response, update DB and title
 router.post("/chat/:id", requireAuth, async (req, res) => {
   try {
-    const { message } = req.body;
+    const { message, fileUrl, fileName, fileType, language } = req.body;
     if (!message) {
       return res.status(400).json({ error: "Message is required." });
     }
@@ -120,14 +120,20 @@ router.post("/chat/:id", requireAuth, async (req, res) => {
     // Build context for AI
     const historyMessages = session.messages || [];
     const aiContext = [
-      ...historyMessages.map(m => ({ role: m.role === "model" ? "assistant" : "user", content: m.content })),
-      { role: "user", content: message }
+      ...historyMessages.map(m => ({
+        role: m.role === "model" ? "assistant" : "user",
+        content: m.content,
+        fileUrl: m.fileUrl,
+        fileName: m.fileName,
+        fileType: m.fileType
+      })),
+      { role: "user", content: message, fileUrl, fileName, fileType }
     ];
 
     // Limit to last 20 messages for context
     const slicedContext = aiContext.slice(-20);
 
-    const responseText = await chatWithGemini(slicedContext);
+    const responseText = await chatWithGemini(slicedContext, language);
     if (!responseText) {
       return res.status(502).json({ error: "AI failed to respond. Please try again." });
     }
@@ -135,7 +141,7 @@ router.post("/chat/:id", requireAuth, async (req, res) => {
     // Determine updated title if it was default
     let newTitle = session.title;
     if (session.title === "New Conversation" && message) {
-      newTitle = message.substring(0, 30) + (message.length > 30 ? "..." : "");
+      newTitle = await generateChatTitle(message);
     }
 
     // Save
@@ -144,7 +150,14 @@ router.post("/chat/:id", requireAuth, async (req, res) => {
       const dbSession = db.chatHistories.find((c) => c._id === req.params.id);
       if (dbSession) {
         dbSession.messages.push(
-          { role: "user", content: message, timestamp: new Date().toISOString() },
+          {
+            role: "user",
+            content: message,
+            fileUrl: fileUrl || undefined,
+            fileName: fileName || undefined,
+            fileType: fileType || undefined,
+            timestamp: new Date().toISOString()
+          },
           { role: "model", content: responseText, timestamp: new Date().toISOString() }
         );
         dbSession.title = newTitle;
@@ -153,7 +166,13 @@ router.post("/chat/:id", requireAuth, async (req, res) => {
       }
     } else {
       session.messages.push(
-        { role: "user", content: message },
+        {
+          role: "user",
+          content: message,
+          fileUrl: fileUrl || undefined,
+          fileName: fileName || undefined,
+          fileType: fileType || undefined
+        },
         { role: "model", content: responseText }
       );
       session.title = newTitle;
@@ -191,11 +210,11 @@ router.delete("/chat/:id", requireAuth, async (req, res) => {
 // POST /api/ai/chat  — send user message to Gemini (one-off without session storage)
 router.post("/chat", requireAuth, async (req, res) => {
   try {
-    const { message } = req.body;
+    const { message, fileUrl, fileName, fileType, language } = req.body;
     if (!message) {
       return res.status(400).json({ error: "Message is required." });
     }
-    const responseText = await chatWithGemini([{ role: "user", content: message }]);
+    const responseText = await chatWithGemini([{ role: "user", content: message, fileUrl, fileName, fileType }], language);
     res.json({ success: true, response: responseText });
   } catch (err) {
     console.error("One-off AI Chat Error:", err);

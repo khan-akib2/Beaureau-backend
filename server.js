@@ -64,3 +64,5 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`Bureau API running on http://localhost:${PORT}`);
 });
+// Trigger reload: 2026-05-22 16:47
+

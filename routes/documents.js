@@ -10,6 +10,7 @@ import Notification from "../models/Notification.js";
 import { requireAuth } from "../lib/auth.js";
 import { analyzeDocumentWithGroq } from "../lib/groq.js";
 import { uploadToCloudinary } from "../lib/cloudinary.js";
+import { sendNotificationEmail } from "../lib/email.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const router = express.Router();
@@ -75,7 +76,7 @@ router.post("/", requireAuth, upload.single("file"), async (req, res) => {
       }
     }
 
-    const analysis = await analyzeDocumentWithGroq(fileName, fileType, fileSize);
+    const analysis = await analyzeDocumentWithGroq(fileName, fileType, fileSize, fileUrl);
     const conn = await dbConnect();
     let newDoc = null;
 
@@ -85,9 +86,11 @@ router.post("/", requireAuth, upload.single("file"), async (req, res) => {
       db.uploadedDocuments.push(newDoc);
       db.notifications.push({ _id: "notif_" + Math.random().toString(36).substr(2, 9), userId: req.user.id, title: `Document Uploaded: ${fileName}`, message: `Status: ${analysis.status.toUpperCase()}`, type: analysis.status === "verified" ? "success" : "warning", read: false, createdAt: new Date().toISOString() });
       saveMockDb(db);
+      sendNotificationEmail(req.user.email, req.user.name, `Document Uploaded: ${fileName}`, `Status: ${analysis.status.toUpperCase()}`);
     } else {
       newDoc = await UploadedDocument.create({ userId: req.user.id, fileName, fileSize, fileType, fileUrl, summary: analysis.summary, documentType: analysis.documentType, issuingAuthority: analysis.issuingAuthority, suggestions: analysis.suggestions, missingRequirements: analysis.missingRequirements, status: analysis.status });
       await Notification.create({ userId: req.user.id, title: `Document Uploaded: ${fileName}`, message: `Status: ${analysis.status.toUpperCase()}`, type: analysis.status === "verified" ? "success" : "warning" });
+      sendNotificationEmail(req.user.email, req.user.name, `Document Uploaded: ${fileName}`, `Status: ${analysis.status.toUpperCase()}`);
     }
 
     res.json({ success: true, document: newDoc });

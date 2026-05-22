@@ -17,6 +17,16 @@ const UserSchema = new mongoose.Schema(
     otp: { type: String, default: "" },
     otpExpires: { type: Date },
     language: { type: String, default: "en" },
+    emailNotifs: { type: Boolean, default: true },
+    smsNotifs: { type: Boolean, default: true },
+    appNotifs: { type: Boolean, default: true },
+    statusUpdates: { type: Boolean, default: true },
+    isAadhaarLinked: { type: Boolean, default: false },
+    isDigiLockerLinked: { type: Boolean, default: false },
+    aadhaarNum: { type: String, default: "" },
+    aadhaarOtp: { type: String, default: "" },
+    aadhaarOtpExpires: { type: Date },
+    aadhaarData: { type: mongoose.Schema.Types.Mixed, default: null },
   },
   { timestamps: true }
 );

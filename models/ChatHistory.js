@@ -9,6 +9,9 @@ const ChatHistorySchema = new mongoose.Schema(
         {
           role: { type: String, enum: ["user", "model"], required: true },
           content: { type: String, required: true },
+          fileUrl: { type: String },
+          fileName: { type: String },
+          fileType: { type: String },
           timestamp: { type: Date, default: Date.now },
         },
       ],

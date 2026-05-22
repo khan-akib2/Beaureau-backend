@@ -3,12 +3,13 @@ import mongoose from "mongoose";
 import dbConnect, { getMockDb, saveMockDb } from "../lib/db.js";
 import User from "../models/User.js";
 import { hashPassword, verifyPassword, signToken, requireAuth } from "../lib/auth.js";
-import { sendOtpEmail } from "../lib/email.js";
+import { sendOtpEmail, sendAadhaarOtpEmail } from "../lib/email.js";
 
 const router = express.Router();
 
+
 const COOKIE_OPTS = {
-  httpOnly: true,
+  httpOnly: false,
   secure: process.env.NODE_ENV === "production",
   maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days in ms
   path: "/",
@@ -58,7 +59,11 @@ router.post("/register", async (req, res) => {
       }
       saveMockDb(db);
       await sendOtpEmail(email.toLowerCase(), name, otp);
-      return res.json({ success: true, message: "Verification code sent to email.", email: email.toLowerCase() });
+      return res.json({
+        success: true,
+        message: "Verification code sent to email.",
+        email: email.toLowerCase()
+      });
     }
 
     const existingUser = await User.findOne({ email: email.toLowerCase() });
@@ -87,7 +92,11 @@ router.post("/register", async (req, res) => {
     }
 
     await sendOtpEmail(email.toLowerCase(), name, otp);
-    return res.json({ success: true, message: "Verification code sent to email.", email: email.toLowerCase() });
+    return res.json({
+      success: true,
+      message: "Verification code sent to email.",
+      email: email.toLowerCase()
+    });
   } catch (err) {
     console.error("Register Error:", err);
     res.status(500).json({ error: "Internal server error." });
@@ -137,7 +146,7 @@ router.post("/login", async (req, res) => {
       return res.status(400).json({
         error: "Your email address is unverified. A new verification code has been sent.",
         requiresVerification: true,
-        email: user.email,
+        email: user.email
       });
     }
 
@@ -145,6 +154,7 @@ router.post("/login", async (req, res) => {
     res.cookie("bureau_token", token, COOKIE_OPTS);
     return res.json({
       success: true,
+      token,
       user: {
         id: user._id || user.id, name: user.name, email: user.email, role: user.role,
         phone: user.phone || "",
@@ -181,7 +191,7 @@ router.post("/verify-otp", async (req, res) => {
 
       const token = signToken({ id: user._id, email: user.email, name: user.name, role: user.role });
       res.cookie("bureau_token", token, COOKIE_OPTS);
-      return res.json({ success: true, user: { id: user._id, name: user.name, email: user.email, role: user.role, avatar: user.avatar } });
+      return res.json({ success: true, token, user: { id: user._id, name: user.name, email: user.email, role: user.role, avatar: user.avatar } });
     }
 
     const user = await User.findOne({ email: email.toLowerCase() });
@@ -197,7 +207,7 @@ router.post("/verify-otp", async (req, res) => {
 
     const token = signToken({ id: user._id, email: user.email, name: user.name, role: user.role });
     res.cookie("bureau_token", token, COOKIE_OPTS);
-    return res.json({ success: true, user: { id: user._id, name: user.name, email: user.email, role: user.role, avatar: user.avatar } });
+    return res.json({ success: true, token, user: { id: user._id, name: user.name, email: user.email, role: user.role, avatar: user.avatar } });
   } catch (err) {
     console.error("Verify OTP Error:", err);
     res.status(500).json({ error: "Internal server error." });
@@ -225,7 +235,10 @@ router.post("/resend-otp", async (req, res) => {
       saveMockDb(db);
 
       await sendOtpEmail(user.email, user.name, otp);
-      return res.json({ success: true, message: "Verification code resent." });
+      return res.json({
+        success: true,
+        message: "Verification code resent."
+      });
     }
 
     const user = await User.findOne({ email: email.toLowerCase() });
@@ -237,7 +250,10 @@ router.post("/resend-otp", async (req, res) => {
     await user.save();
 
     await sendOtpEmail(user.email, user.name, otp);
-    return res.json({ success: true, message: "Verification code resent." });
+    return res.json({
+      success: true,
+      message: "Verification code resent."
+    });
   } catch (err) {
     console.error("Resend OTP Error:", err);
     res.status(500).json({ error: "Internal server error." });
@@ -272,14 +288,36 @@ router.get("/me", requireAuth, async (req, res) => {
       return res.status(404).json({ error: "User not found." });
     }
 
+    let token = null;
+    const authHeader = req.headers["authorization"];
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      token = authHeader.split(" ")[1];
+    }
+    if (!token && req.cookies?.bureau_token) {
+      token = req.cookies.bureau_token;
+    }
+    if (!token || req.user.role !== user.role) {
+      token = signToken({ id: user._id || user.id, email: user.email, name: user.name, role: user.role });
+      res.cookie("bureau_token", token, COOKIE_OPTS);
+    }
+
     return res.json({
       success: true,
+      token,
       user: {
         id: user._id || user.id, name: user.name, email: user.email, role: user.role,
         phone: user.phone || "",
         avatar: user.avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(user.name)}`,
         language: user.language || "en",
         isVerified: user.isVerified || false,
+        emailNotifs: user.emailNotifs !== undefined ? user.emailNotifs : true,
+        smsNotifs: user.smsNotifs !== undefined ? user.smsNotifs : true,
+        appNotifs: user.appNotifs !== undefined ? user.appNotifs : true,
+        statusUpdates: user.statusUpdates !== undefined ? user.statusUpdates : true,
+        isAadhaarLinked: user.isAadhaarLinked || false,
+        isDigiLockerLinked: user.isDigiLockerLinked || false,
+        aadhaarNum: user.aadhaarNum || "",
+        aadhaarData: user.aadhaarData || null,
       },
     });
   } catch (err) {
@@ -291,7 +329,19 @@ router.get("/me", requireAuth, async (req, res) => {
 // PATCH /api/auth/me  — update profile
 router.patch("/me", requireAuth, async (req, res) => {
   try {
-    const { name, email, phone, password, avatar, language } = req.body;
+    const {
+      name, email, phone, password, avatar, language,
+      emailNotifs, smsNotifs, appNotifs, statusUpdates,
+      isAadhaarLinked, isDigiLockerLinked
+    } = req.body;
+
+    if (password) {
+      const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*(),.?":{}|<>]).{8,}$/;
+      if (!passwordRegex.test(password)) {
+        return res.status(400).json({ error: "Password must be at least 8 characters and contain uppercase, lowercase, numbers, and special characters." });
+      }
+    }
+
     const conn = await dbConnect();
 
     // Guard: if the token carries a non-ObjectId ID (old mock token), use mock DB.
@@ -306,10 +356,30 @@ router.patch("/me", requireAuth, async (req, res) => {
       if (phone) db.users[idx].phone = phone;
       if (avatar) db.users[idx].avatar = avatar;
       if (language) db.users[idx].language = language;
+      if (emailNotifs !== undefined) db.users[idx].emailNotifs = emailNotifs;
+      if (smsNotifs !== undefined) db.users[idx].smsNotifs = smsNotifs;
+      if (appNotifs !== undefined) db.users[idx].appNotifs = appNotifs;
+      if (statusUpdates !== undefined) db.users[idx].statusUpdates = statusUpdates;
+      if (isAadhaarLinked !== undefined) db.users[idx].isAadhaarLinked = isAadhaarLinked;
+      if (isDigiLockerLinked !== undefined) db.users[idx].isDigiLockerLinked = isDigiLockerLinked;
       if (password) db.users[idx].password = await hashPassword(password);
       saveMockDb(db);
       const u = db.users[idx];
-      return res.json({ success: true, user: { id: u._id, name: u.name, email: u.email, role: u.role, phone: u.phone || "", avatar: u.avatar, language: u.language || "en", isVerified: u.isVerified || false } });
+      return res.json({
+        success: true,
+        user: {
+          id: u._id, name: u.name, email: u.email, role: u.role, phone: u.phone || "",
+          avatar: u.avatar, language: u.language || "en", isVerified: u.isVerified || false,
+          emailNotifs: u.emailNotifs !== undefined ? u.emailNotifs : true,
+          smsNotifs: u.smsNotifs !== undefined ? u.smsNotifs : true,
+          appNotifs: u.appNotifs !== undefined ? u.appNotifs : true,
+          statusUpdates: u.statusUpdates !== undefined ? u.statusUpdates : true,
+          isAadhaarLinked: u.isAadhaarLinked || false,
+          isDigiLockerLinked: u.isDigiLockerLinked || false,
+          aadhaarNum: u.aadhaarNum || "",
+          aadhaarData: u.aadhaarData || null,
+        }
+      });
     }
 
     const updates = {};
@@ -318,11 +388,31 @@ router.patch("/me", requireAuth, async (req, res) => {
     if (phone) updates.phone = phone;
     if (avatar) updates.avatar = avatar;
     if (language) updates.language = language;
+    if (emailNotifs !== undefined) updates.emailNotifs = emailNotifs;
+    if (smsNotifs !== undefined) updates.smsNotifs = smsNotifs;
+    if (appNotifs !== undefined) updates.appNotifs = appNotifs;
+    if (statusUpdates !== undefined) updates.statusUpdates = statusUpdates;
+    if (isAadhaarLinked !== undefined) updates.isAadhaarLinked = isAadhaarLinked;
+    if (isDigiLockerLinked !== undefined) updates.isDigiLockerLinked = isDigiLockerLinked;
     if (password) updates.password = await hashPassword(password);
 
-    const updated = await User.findByIdAndUpdate(req.user.id, { $set: updates }, { new: true }).select("-password");
+    const updated = await User.findByIdAndUpdate(req.user.id, { $set: updates }, { returnDocument: 'after' }).select("-password");
     if (!updated) return res.status(404).json({ error: "User not found in database." });
-    return res.json({ success: true, user: { id: updated._id, name: updated.name, email: updated.email, role: updated.role, phone: updated.phone || "", avatar: updated.avatar, language: updated.language || "en", isVerified: updated.isVerified || false } });
+    return res.json({
+      success: true,
+      user: {
+        id: updated._id, name: updated.name, email: updated.email, role: updated.role, phone: updated.phone || "",
+        avatar: updated.avatar, language: updated.language || "en", isVerified: updated.isVerified || false,
+        emailNotifs: updated.emailNotifs !== undefined ? updated.emailNotifs : true,
+        smsNotifs: updated.smsNotifs !== undefined ? updated.smsNotifs : true,
+        appNotifs: updated.appNotifs !== undefined ? updated.appNotifs : true,
+        statusUpdates: updated.statusUpdates !== undefined ? updated.statusUpdates : true,
+        isAadhaarLinked: updated.isAadhaarLinked || false,
+        isDigiLockerLinked: updated.isDigiLockerLinked || false,
+        aadhaarNum: updated.aadhaarNum || "",
+        aadhaarData: updated.aadhaarData || null,
+      }
+    });
   } catch (err) {
     console.error("PATCH Me Error:", err);
     res.status(500).json({ error: "Internal server error." });
@@ -379,7 +469,7 @@ router.post("/google", async (req, res) => {
 
     const token = signToken({ id: user._id || user.id, email: user.email, name: user.name, role: user.role });
     res.cookie("bureau_token", token, COOKIE_OPTS);
-    return res.json({ success: true, user: { id: user._id || user.id, name: user.name, email: user.email, role: user.role, avatar: user.avatar } });
+    return res.json({ success: true, token, user: { id: user._id || user.id, name: user.name, email: user.email, role: user.role, avatar: user.avatar } });
   } catch (err) {
     console.error("Google Auth Error:", err);
     res.status(500).json({ error: "Google Authentication failed." });
@@ -410,13 +500,222 @@ router.post("/make-admin", async (req, res) => {
     const user = await User.findOneAndUpdate(
       { email: email.toLowerCase() },
       { $set: { role: "admin" } },
-      { new: true }
+      { returnDocument: 'after' }
     );
     if (!user) return res.status(404).json({ error: "User not found." });
     return res.json({ success: true, message: `${email} is now an admin.` });
   } catch (err) {
     console.error("Make Admin Error:", err);
     res.status(500).json({ error: "Internal server error." });
+  }
+});
+
+// Verhoeff Algorithm Tables
+const VERHOEFF_D = [
+  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+  [1, 2, 3, 4, 0, 6, 7, 8, 9, 5],
+  [2, 3, 4, 0, 1, 7, 8, 9, 5, 6],
+  [3, 4, 0, 1, 2, 8, 9, 5, 6, 7],
+  [4, 0, 1, 2, 3, 9, 5, 6, 7, 8],
+  [5, 9, 8, 7, 6, 0, 4, 3, 2, 1],
+  [6, 5, 9, 8, 7, 1, 0, 4, 3, 2],
+  [7, 6, 5, 9, 8, 2, 1, 0, 4, 3],
+  [8, 7, 6, 5, 9, 3, 2, 1, 0, 4],
+  [9, 8, 7, 6, 5, 4, 3, 2, 1, 0]
+];
+
+const VERHOEFF_P = [
+  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+  [1, 5, 7, 6, 2, 8, 3, 0, 9, 4],
+  [5, 8, 0, 3, 7, 9, 6, 1, 4, 2],
+  [8, 9, 1, 6, 0, 4, 3, 5, 2, 7],
+  [9, 4, 5, 3, 1, 2, 6, 8, 7, 0],
+  [4, 2, 8, 6, 5, 7, 3, 9, 0, 1],
+  [2, 7, 9, 3, 8, 0, 6, 4, 1, 5],
+  [7, 0, 4, 6, 9, 1, 3, 2, 5, 8]
+];
+
+function validateAadhaar(aadhaarNum) {
+  const cleanStr = aadhaarNum.replace(/\s+/g, "");
+  if (cleanStr.length !== 12 || !/^\d+$/.test(cleanStr)) {
+    return false;
+  }
+  // Bypass/allow the demo card proposed in the implementation plan
+  if (cleanStr === "365892059182") {
+    return true;
+  }
+  let c = 0;
+  cleanStr.split("").reverse().forEach((digit, i) => {
+    c = VERHOEFF_D[c][VERHOEFF_P[(i + 1) % 8][parseInt(digit, 10)]];
+  });
+  return c === 0;
+}
+
+// POST /api/auth/aadhaar/send-otp
+router.post("/aadhaar/send-otp", requireAuth, async (req, res) => {
+  try {
+    const { aadhaarNum } = req.body;
+    if (!aadhaarNum) {
+      return res.status(400).json({ error: "Aadhaar number is required." });
+    }
+
+    const cleanAadhaar = aadhaarNum.replace(/\s+/g, "");
+    if (cleanAadhaar.length !== 12 || !/^\d+$/.test(cleanAadhaar)) {
+      return res.status(400).json({ error: "Aadhaar number must be exactly 12 digits." });
+    }
+
+    // Verhoeff validation
+    const isValidAadhaar = validateAadhaar(cleanAadhaar);
+    if (!isValidAadhaar) {
+      return res.status(400).json({ error: "Invalid Aadhaar number (checksum validation failed)." });
+    }
+
+    const conn = await dbConnect();
+    const isRealObjectId = mongoose.Types.ObjectId.isValid(req.user.id);
+    let user = null;
+    let email = "";
+    let name = "";
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+    if (conn.isMock || !isRealObjectId) {
+      const db = getMockDb();
+      const userIdx = db.users.findIndex((u) => u._id === req.user.id);
+      if (userIdx === -1) {
+        return res.status(404).json({ error: "User not found." });
+      }
+      db.users[userIdx].aadhaarNum = cleanAadhaar;
+      db.users[userIdx].aadhaarOtp = otp;
+      db.users[userIdx].aadhaarOtpExpires = otpExpires.toISOString();
+      saveMockDb(db);
+      user = db.users[userIdx];
+      email = user.email;
+      name = user.name;
+    } else {
+      user = await User.findById(req.user.id);
+      if (!user) {
+        return res.status(404).json({ error: "User not found." });
+      }
+      user.aadhaarNum = cleanAadhaar;
+      user.aadhaarOtp = otp;
+      user.aadhaarOtpExpires = otpExpires;
+      await user.save();
+      email = user.email;
+      name = user.name;
+    }
+
+    // Send styled Aadhaar OTP Email
+    await sendAadhaarOtpEmail(email, name, otp, cleanAadhaar);
+
+    return res.json({
+      success: true,
+      message: "OTP sent to your registered mobile/email."
+    });
+  } catch (err) {
+    console.error("Aadhaar Send OTP Error:", err);
+    return res.status(500).json({ error: "Internal server error." });
+  }
+});
+
+// POST /api/auth/aadhaar/verify-otp
+router.post("/aadhaar/verify-otp", requireAuth, async (req, res) => {
+  try {
+    const { otp } = req.body;
+    if (!otp) {
+      return res.status(400).json({ error: "Verification code (OTP) is required." });
+    }
+
+    const conn = await dbConnect();
+    const isRealObjectId = mongoose.Types.ObjectId.isValid(req.user.id);
+    let user = null;
+
+    if (conn.isMock || !isRealObjectId) {
+      const db = getMockDb();
+      const userIdx = db.users.findIndex((u) => u._id === req.user.id);
+      if (userIdx === -1) {
+        return res.status(404).json({ error: "User not found." });
+      }
+      user = db.users[userIdx];
+    } else {
+      user = await User.findById(req.user.id);
+      if (!user) {
+        return res.status(404).json({ error: "User not found." });
+      }
+    }
+
+    if (!user.aadhaarOtp || user.aadhaarOtp !== otp) {
+      return res.status(400).json({ error: "Invalid verification code." });
+    }
+
+    const expires = new Date(user.aadhaarOtpExpires);
+    if (expires.getTime() < Date.now()) {
+      return res.status(400).json({ error: "Verification code has expired. Please request a new one." });
+    }
+
+    const rawAadhaar = user.aadhaarNum;
+    const maskedAadhaar = "XXXX XXXX " + rawAadhaar.slice(-4);
+
+    // Generate demographic details
+    const mockAadhaarName = user.name.toUpperCase();
+    const mockGender = user.name.toLowerCase().includes("khanak") || user.email.toLowerCase().includes("khanak") ? "FEMALE" : "MALE";
+    const mockDob = "12/04/1995";
+    const mockAddress = "H No 142/A, Gali No 4, Block B, Vikas Nagar, Uttam Nagar, West Delhi, Delhi - 110059";
+    const mockPhoto = `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(user.name)}&backgroundColor=b6e3f4`;
+    const mockQrData = `UIDAI:Aadhaar:${rawAadhaar}:${mockAadhaarName}:${mockDob}:${mockGender}:${mockAddress}`;
+
+    const aadhaarData = {
+      name: mockAadhaarName,
+      dob: mockDob,
+      gender: mockGender,
+      address: mockAddress,
+      photo: mockPhoto,
+      qrData: mockQrData,
+      rawAadhaar: rawAadhaar,
+    };
+
+    if (conn.isMock || !isRealObjectId) {
+      const db = getMockDb();
+      const userIdx = db.users.findIndex((u) => u._id === req.user.id);
+      db.users[userIdx].isAadhaarLinked = true;
+      db.users[userIdx].aadhaarNum = maskedAadhaar;
+      db.users[userIdx].aadhaarOtp = "";
+      db.users[userIdx].aadhaarData = aadhaarData;
+      saveMockDb(db);
+      user = db.users[userIdx];
+    } else {
+      user.isAadhaarLinked = true;
+      user.aadhaarNum = maskedAadhaar;
+      user.aadhaarOtp = "";
+      user.aadhaarData = aadhaarData;
+      await user.save();
+    }
+
+    return res.json({
+      success: true,
+      message: "Aadhaar linked successfully.",
+      user: {
+        id: user._id || user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        phone: user.phone || "",
+        avatar: user.avatar,
+        language: user.language || "en",
+        isVerified: user.isVerified || false,
+        emailNotifs: user.emailNotifs !== undefined ? user.emailNotifs : true,
+        smsNotifs: user.smsNotifs !== undefined ? user.smsNotifs : true,
+        appNotifs: user.appNotifs !== undefined ? user.appNotifs : true,
+        statusUpdates: user.statusUpdates !== undefined ? user.statusUpdates : true,
+        isAadhaarLinked: true,
+        isDigiLockerLinked: user.isDigiLockerLinked || false,
+        aadhaarNum: maskedAadhaar,
+        aadhaarData: aadhaarData,
+      }
+    });
+  } catch (err) {
+    console.error("Aadhaar Verify OTP Error:", err);
+    return res.status(500).json({ error: "Internal server error." });
   }
 });
 
