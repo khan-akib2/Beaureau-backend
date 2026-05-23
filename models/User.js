@@ -27,6 +27,8 @@ const UserSchema = new mongoose.Schema(
     aadhaarOtp: { type: String, default: "" },
     aadhaarOtpExpires: { type: Date },
     aadhaarData: { type: mongoose.Schema.Types.Mixed, default: null },
+    resetOtp: { type: String, default: "" },
+    resetOtpExpires: { type: Date },
   },
   { timestamps: true }
 );

@@ -15,7 +15,7 @@ import { sendNotificationEmail } from "../lib/email.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const router = express.Router();
 
-// Multer — store uploads in /uploads folder, 10 MB limit
+// Multer — store uploads in /uploads folder, 10 MB limit, safe file filter
 const storage = multer.diskStorage({
   destination: path.join(__dirname, "..", "uploads"),
   filename: (req, file, cb) => {
@@ -23,7 +23,24 @@ const storage = multer.diskStorage({
     cb(null, unique + path.extname(file.originalname));
   },
 });
-const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } });
+
+const fileFilter = (req, file, cb) => {
+  const allowedExtensions = [".pdf", ".png", ".jpg", ".jpeg", ".webp", ".doc", ".docx"];
+  const ext = path.extname(file.originalname).toLowerCase();
+  if (allowedExtensions.includes(ext)) {
+    cb(null, true);
+  } else {
+    cb(new Error("Invalid file type. Only PDF, DOCX, PNG, JPG, JPEG, and WEBP documents are allowed."));
+  }
+};
+
+const upload = multer({ 
+  storage, 
+  fileFilter,
+  limits: { fileSize: 10 * 1024 * 1024 } 
+});
+
+const uploadSingle = upload.single("file");
 
 // GET /api/documents
 router.get("/", requireAuth, async (req, res) => {
@@ -49,7 +66,14 @@ router.get("/", requireAuth, async (req, res) => {
 });
 
 // POST /api/documents  — accepts either a real file upload OR JSON metadata
-router.post("/", requireAuth, upload.single("file"), async (req, res) => {
+router.post("/", requireAuth, (req, res, next) => {
+  uploadSingle(req, res, (err) => {
+    if (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    next();
+  });
+}, async (req, res) => {
   try {
     // Support both multipart (real file) and JSON (metadata-only from frontend)
     const fileName = req.file?.originalname || req.body.fileName;

@@ -23,6 +23,16 @@ const ApplicationSchema = new mongoose.Schema(
       default: [],
     },
     estimatedCompletion: { type: Date },
+    copilotHistory: {
+      type: [
+        {
+          role: { type: String, enum: ["user", "model"], required: true },
+          content: { type: String, required: true },
+          timestamp: { type: Date, default: Date.now },
+        },
+      ],
+      default: [],
+    },
   },
   { timestamps: true }
 );

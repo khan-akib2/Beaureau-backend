@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import dbConnect, { getMockDb, saveMockDb } from "../lib/db.js";
 import ChatHistory from "../models/ChatHistory.js";
 import EligibilityCheck from "../models/EligibilityCheck.js";
+import Application from "../models/Application.js";
 import { requireAuth } from "../lib/auth.js";
 import { chatWithGemini, translateLegalText, checkEligibility, generateSchemeGuide, generateChatTitle } from "../lib/gemini.js";
 
@@ -311,7 +312,7 @@ router.post("/guide", requireAuth, async (req, res) => {
 // POST /api/ai/guide/chat  — chat specifically about a scheme application pathway
 router.post("/guide/chat", requireAuth, async (req, res) => {
   try {
-    const { schemeName, department, messages } = req.body;
+    const { applicationId, schemeName, department, messages } = req.body;
     if (!schemeName || !messages || !Array.isArray(messages)) {
       return res.status(400).json({ error: "schemeName and messages array are required." });
     }
@@ -332,6 +333,39 @@ Be concise, clear, and direct. Keep your answers professional and friendly, refe
     ];
 
     const responseText = await chatWithGemini(chatMessages);
+    if (!responseText) {
+      return res.status(502).json({ error: "AI failed to respond. Please try again." });
+    }
+
+    const lastUserMessage = messages[messages.length - 1]?.content || "";
+
+    if (applicationId) {
+      const conn = await dbConnect();
+      if (conn.isMock) {
+        const db = getMockDb();
+        const app = db.applications.find(a => a._id === applicationId);
+        if (app) {
+          if (!app.copilotHistory) app.copilotHistory = [];
+          app.copilotHistory.push(
+            { role: "user", content: lastUserMessage, timestamp: new Date().toISOString() },
+            { role: "model", content: responseText, timestamp: new Date().toISOString() }
+          );
+          saveMockDb(db);
+        }
+      } else {
+        await Application.findByIdAndUpdate(applicationId, {
+          $push: {
+            copilotHistory: {
+              $each: [
+                { role: "user", content: lastUserMessage },
+                { role: "model", content: responseText }
+              ]
+            }
+          }
+        });
+      }
+    }
+
     res.json({ success: true, response: responseText });
   } catch (err) {
     console.error("Scheme Guide Chat Error:", err);

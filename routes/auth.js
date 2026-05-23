@@ -3,9 +3,12 @@ import mongoose from "mongoose";
 import dbConnect, { getMockDb, saveMockDb } from "../lib/db.js";
 import User from "../models/User.js";
 import { hashPassword, verifyPassword, signToken, requireAuth } from "../lib/auth.js";
-import { sendOtpEmail, sendAadhaarOtpEmail } from "../lib/email.js";
+import { sendOtpEmail, sendAadhaarOtpEmail, sendForgotPasswordOtpEmail } from "../lib/email.js";
 
 const router = express.Router();
+
+const OTP_RETRY_LIMIT = 5;
+const failedAttempts = new Map();
 
 
 const COOKIE_OPTS = {
@@ -59,10 +62,12 @@ router.post("/register", async (req, res) => {
       }
       saveMockDb(db);
       await sendOtpEmail(email.toLowerCase(), name, otp);
+      const isDev = process.env.NODE_ENV !== "production";
       return res.json({
         success: true,
         message: "Verification code sent to email.",
-        email: email.toLowerCase()
+        email: email.toLowerCase(),
+        ...(isDev ? { otp } : {})
       });
     }
 
@@ -92,10 +97,12 @@ router.post("/register", async (req, res) => {
     }
 
     await sendOtpEmail(email.toLowerCase(), name, otp);
+    const isDev = process.env.NODE_ENV !== "production";
     return res.json({
       success: true,
       message: "Verification code sent to email.",
-      email: email.toLowerCase()
+      email: email.toLowerCase(),
+      ...(isDev ? { otp } : {})
     });
   } catch (err) {
     console.error("Register Error:", err);
@@ -142,11 +149,12 @@ router.post("/login", async (req, res) => {
       }
 
       await sendOtpEmail(user.email, user.name, otp);
-
+      const isDev = process.env.NODE_ENV !== "production";
       return res.status(400).json({
         error: "Your email address is unverified. A new verification code has been sent.",
         requiresVerification: true,
-        email: user.email
+        email: user.email,
+        ...(isDev ? { otp } : {})
       });
     }
 
@@ -174,6 +182,20 @@ router.post("/verify-otp", async (req, res) => {
     if (!email || !otp) return res.status(400).json({ error: "Email and code are required." });
 
     const conn = await dbConnect();
+    const attemptsKey = `${email.toLowerCase()}_auth`;
+    const currentAttempts = failedAttempts.get(attemptsKey) || 0;
+
+    if (currentAttempts >= OTP_RETRY_LIMIT) {
+      if (conn.isMock) {
+        const db = getMockDb();
+        const user = db.users.find((u) => u.email === email.toLowerCase());
+        if (user) { user.otp = ""; saveMockDb(db); }
+      } else {
+        await User.findOneAndUpdate({ email: email.toLowerCase() }, { $set: { otp: "" } });
+      }
+      failedAttempts.delete(attemptsKey);
+      return res.status(429).json({ error: "Too many failed attempts. Your verification code has been invalidated. Please request a new one." });
+    }
 
     if (conn.isMock) {
       const db = getMockDb();
@@ -182,12 +204,17 @@ router.post("/verify-otp", async (req, res) => {
 
       const dbOtpExpires = new Date(user.otpExpires).getTime();
       if (user.otp !== otp || dbOtpExpires < Date.now()) {
-        return res.status(400).json({ error: "Invalid or expired verification code." });
+        const nextAttempts = currentAttempts + 1;
+        failedAttempts.set(attemptsKey, nextAttempts);
+        return res.status(400).json({ 
+          error: `Invalid or expired verification code. Attempts remaining: ${Math.max(0, OTP_RETRY_LIMIT - nextAttempts)}` 
+        });
       }
 
       user.isVerified = true;
       user.otp = "";
       saveMockDb(db);
+      failedAttempts.delete(attemptsKey);
 
       const token = signToken({ id: user._id, email: user.email, name: user.name, role: user.role });
       res.cookie("bureau_token", token, COOKIE_OPTS);
@@ -198,12 +225,17 @@ router.post("/verify-otp", async (req, res) => {
     if (!user) return res.status(404).json({ error: "User not found." });
 
     if (user.otp !== otp || user.otpExpires.getTime() < Date.now()) {
-      return res.status(400).json({ error: "Invalid or expired verification code." });
+      const nextAttempts = currentAttempts + 1;
+      failedAttempts.set(attemptsKey, nextAttempts);
+      return res.status(400).json({ 
+        error: `Invalid or expired verification code. Attempts remaining: ${Math.max(0, OTP_RETRY_LIMIT - nextAttempts)}` 
+      });
     }
 
     user.isVerified = true;
     user.otp = "";
     await user.save();
+    failedAttempts.delete(attemptsKey);
 
     const token = signToken({ id: user._id, email: user.email, name: user.name, role: user.role });
     res.cookie("bureau_token", token, COOKIE_OPTS);
@@ -235,9 +267,11 @@ router.post("/resend-otp", async (req, res) => {
       saveMockDb(db);
 
       await sendOtpEmail(user.email, user.name, otp);
+      const isDev = process.env.NODE_ENV !== "production";
       return res.json({
         success: true,
-        message: "Verification code resent."
+        message: "Verification code resent.",
+        ...(isDev ? { otp } : {})
       });
     }
 
@@ -250,9 +284,11 @@ router.post("/resend-otp", async (req, res) => {
     await user.save();
 
     await sendOtpEmail(user.email, user.name, otp);
+    const isDev = process.env.NODE_ENV !== "production";
     return res.json({
       success: true,
-      message: "Verification code resent."
+      message: "Verification code resent.",
+      ...(isDev ? { otp } : {})
     });
   } catch (err) {
     console.error("Resend OTP Error:", err);
@@ -479,6 +515,9 @@ router.post("/google", async (req, res) => {
 // Remove this route before going to production
 router.post("/make-admin", async (req, res) => {
   try {
+    if (process.env.NODE_ENV === "production") {
+      return res.status(403).json({ error: "This development utility endpoint is disabled in production." });
+    }
     const { email, secret } = req.body;
     if (secret !== (process.env.ADMIN_SECRET || "bureau-admin-2026")) {
       return res.status(403).json({ error: "Invalid secret." });
@@ -607,9 +646,11 @@ router.post("/aadhaar/send-otp", requireAuth, async (req, res) => {
     // Send styled Aadhaar OTP Email
     await sendAadhaarOtpEmail(email, name, otp, cleanAadhaar);
 
+    const isDev = process.env.NODE_ENV !== "production";
     return res.json({
       success: true,
-      message: "OTP sent to your registered mobile/email."
+      message: "OTP sent to your registered mobile/email.",
+      ...(isDev ? { otp } : {})
     });
   } catch (err) {
     console.error("Aadhaar Send OTP Error:", err);
@@ -628,6 +669,21 @@ router.post("/aadhaar/verify-otp", requireAuth, async (req, res) => {
     const conn = await dbConnect();
     const isRealObjectId = mongoose.Types.ObjectId.isValid(req.user.id);
     let user = null;
+    
+    const attemptsKey = `${req.user.email.toLowerCase()}_aadhaar`;
+    const currentAttempts = failedAttempts.get(attemptsKey) || 0;
+
+    if (currentAttempts >= OTP_RETRY_LIMIT) {
+      if (conn.isMock || !isRealObjectId) {
+        const db = getMockDb();
+        const userIdx = db.users.findIndex((u) => u._id === req.user.id);
+        if (userIdx !== -1) { db.users[userIdx].aadhaarOtp = ""; saveMockDb(db); }
+      } else {
+        await User.findByIdAndUpdate(req.user.id, { $set: { aadhaarOtp: "" } });
+      }
+      failedAttempts.delete(attemptsKey);
+      return res.status(429).json({ error: "Too many failed attempts. Your Aadhaar verification code has been invalidated. Please request a new one." });
+    }
 
     if (conn.isMock || !isRealObjectId) {
       const db = getMockDb();
@@ -644,13 +700,21 @@ router.post("/aadhaar/verify-otp", requireAuth, async (req, res) => {
     }
 
     if (!user.aadhaarOtp || user.aadhaarOtp !== otp) {
-      return res.status(400).json({ error: "Invalid verification code." });
+      const nextAttempts = currentAttempts + 1;
+      failedAttempts.set(attemptsKey, nextAttempts);
+      return res.status(400).json({ 
+        error: `Invalid verification code. Attempts remaining: ${Math.max(0, OTP_RETRY_LIMIT - nextAttempts)}` 
+      });
     }
 
     const expires = new Date(user.aadhaarOtpExpires);
     if (expires.getTime() < Date.now()) {
+      const nextAttempts = currentAttempts + 1;
+      failedAttempts.set(attemptsKey, nextAttempts);
       return res.status(400).json({ error: "Verification code has expired. Please request a new one." });
     }
+
+    failedAttempts.delete(attemptsKey);
 
     const rawAadhaar = user.aadhaarNum;
     const maskedAadhaar = "XXXX XXXX " + rawAadhaar.slice(-4);
@@ -715,6 +779,119 @@ router.post("/aadhaar/verify-otp", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("Aadhaar Verify OTP Error:", err);
     return res.status(500).json({ error: "Internal server error." });
+  }
+});
+
+// POST /api/auth/forgot-password
+router.post("/forgot-password", async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: "Email is required." });
+
+    const conn = await dbConnect();
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+    let name = "";
+    
+    if (conn.isMock) {
+      const db = getMockDb();
+      const user = db.users.find((u) => u.email === email.toLowerCase());
+      if (!user) {
+        return res.status(404).json({ error: "No user with this email address was found." });
+      }
+      user.resetOtp = otp;
+      user.resetOtpExpires = otpExpires.toISOString();
+      saveMockDb(db);
+      name = user.name;
+    } else {
+      const user = await User.findOne({ email: email.toLowerCase() });
+      if (!user) {
+        return res.status(404).json({ error: "No user with this email address was found." });
+      }
+      user.resetOtp = otp;
+      user.resetOtpExpires = otpExpires;
+      await user.save();
+      name = user.name;
+    }
+
+    // Send password reset OTP email
+    await sendForgotPasswordOtpEmail(email.toLowerCase(), name, otp);
+
+    const isDev = process.env.NODE_ENV !== "production";
+    return res.json({
+      success: true,
+      message: "Password reset OTP has been sent to your email address.",
+      email: email.toLowerCase(),
+      ...(isDev ? { otp } : {})
+    });
+  } catch (err) {
+    console.error("Forgot Password Error:", err);
+    res.status(500).json({ error: "Internal server error." });
+  }
+});
+
+// POST /api/auth/reset-password
+router.post("/reset-password", async (req, res) => {
+  try {
+    const { email, otp, password } = req.body;
+    if (!email || !otp || !password) {
+      return res.status(400).json({ error: "Email, code, and new password are required." });
+    }
+    if (password.length < 6) {
+      return res.status(400).json({ error: "Password must be at least 6 characters." });
+    }
+
+    const conn = await dbConnect();
+    const hashedPassword = await hashPassword(password);
+
+    if (conn.isMock) {
+      const db = getMockDb();
+      const user = db.users.find((u) => u.email === email.toLowerCase());
+      if (!user) {
+        return res.status(404).json({ error: "User not found." });
+      }
+
+      if (!user.resetOtp || user.resetOtp !== otp) {
+        return res.status(400).json({ error: "Invalid password reset code." });
+      }
+
+      const expires = new Date(user.resetOtpExpires).getTime();
+      if (expires < Date.now()) {
+        return res.status(400).json({ error: "Password reset code has expired. Please request a new one." });
+      }
+
+      user.password = hashedPassword;
+      user.resetOtp = "";
+      user.resetOtpExpires = null;
+      saveMockDb(db);
+    } else {
+      const user = await User.findOne({ email: email.toLowerCase() });
+      if (!user) {
+        return res.status(404).json({ error: "User not found." });
+      }
+
+      if (!user.resetOtp || user.resetOtp !== otp) {
+        return res.status(400).json({ error: "Invalid password reset code." });
+      }
+
+      if (user.resetOtpExpires.getTime() < Date.now()) {
+        return res.status(400).json({ error: "Password reset code has expired. Please request a new one." });
+      }
+
+      user.password = hashedPassword;
+      user.resetOtp = "";
+      user.resetOtpExpires = null;
+      await user.save();
+    }
+
+    return res.json({
+      success: true,
+      message: "Your password has been successfully reset. You can now log in."
+    });
+  } catch (err) {
+    console.error("Reset Password Error:", err);
+    res.status(500).json({ error: "Internal server error." });
   }
 });
 
