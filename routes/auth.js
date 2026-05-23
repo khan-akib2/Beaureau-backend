@@ -298,7 +298,11 @@ router.post("/resend-otp", async (req, res) => {
 
 // POST /api/auth/logout
 router.post("/logout", (req, res) => {
-  res.clearCookie("bureau_token", { path: "/" });
+  res.clearCookie("bureau_token", {
+    path: "/",
+    secure: process.env.NODE_ENV === "production",
+    sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+  });
   res.json({ success: true, message: "Successfully logged out." });
 });
 
