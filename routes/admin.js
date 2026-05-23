@@ -275,15 +275,42 @@ router.get("/analytics", requireAdmin, async (req, res) => {
 router.get("/users", requireAdmin, async (req, res) => {
   try {
     const conn = await dbConnect();
-    let users = [];
-    if (conn.isMock) {
+    
+    // 1. Fetch Mock Users
+    let mockUsers = [];
+    try {
       const db = getMockDb();
-      users = db.users.map(({ password, ...u }) => u);
-    } else {
-      users = await User.find({}).select("-password").sort({ createdAt: -1 });
+      mockUsers = db.users.map(({ password, ...u }) => u);
+    } catch (mockErr) {
+      console.error("Failed to fetch mock users:", mockErr);
     }
+
+    // 2. Fetch Real Users
+    let realUsers = [];
+    try {
+      realUsers = await User.find({}).select("-password").sort({ createdAt: -1 });
+    } catch (dbErr) {
+      console.error("Failed to fetch real MongoDB users:", dbErr);
+    }
+
+    // 3. Merge users by email (case-insensitive), prioritizing real MongoDB users
+    const mergedMap = new Map();
+    mockUsers.forEach((u) => {
+      if (u.email) {
+        mergedMap.set(u.email.toLowerCase(), u);
+      }
+    });
+    realUsers.forEach((u) => {
+      const userObj = u.toObject ? u.toObject() : u;
+      if (userObj.email) {
+        mergedMap.set(userObj.email.toLowerCase(), userObj);
+      }
+    });
+
+    const users = Array.from(mergedMap.values());
     res.json({ success: true, users });
   } catch (err) {
+    console.error("GET /api/admin/users error:", err);
     res.status(500).json({ error: "Failed to fetch users." });
   }
 });

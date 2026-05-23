@@ -30,9 +30,10 @@ router.post("/", requireAuth, async (req, res) => {
     }
 
     if (userId === "all") {
-      if (conn.isMock) {
+      // 1. Dispatch to Mock DB
+      try {
         const db = getMockDb();
-        const newNotifications = db.users.map((u) => ({
+        const mockNotifications = db.users.map((u) => ({
           _id: "notif_" + Math.random().toString(36).substr(2, 9),
           userId: u._id,
           title,
@@ -42,19 +43,27 @@ router.post("/", requireAuth, async (req, res) => {
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString()
         }));
-        db.notifications.push(...newNotifications);
+        db.notifications.push(...mockNotifications);
         saveMockDb(db);
-      } else {
+      } catch (mockErr) {
+        console.error("Mock DB broadcast failed:", mockErr);
+      }
+
+      // 2. Dispatch to MongoDB Atlas
+      try {
         const allUsers = await User.find({});
-        const newNotifications = allUsers.map((u) => ({
+        const realNotifications = allUsers.map((u) => ({
           userId: u._id,
           title,
           message,
           type: type || "info",
           read: false
         }));
-        await Notification.insertMany(newNotifications);
+        await Notification.insertMany(realNotifications);
+      } catch (dbErr) {
+        console.error("MongoDB broadcast failed:", dbErr);
       }
+
       return res.json({ success: true, message: "Broadcast notification dispatched." });
     }
 
