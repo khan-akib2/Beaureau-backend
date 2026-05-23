@@ -8,7 +8,7 @@ import ChatHistory from "../models/ChatHistory.js";
 import EligibilityCheck from "../models/EligibilityCheck.js";
 import Notification from "../models/Notification.js";
 import { requireAdmin } from "../lib/auth.js";
-import { sendNotificationEmail } from "../lib/email.js";
+import { sendNotificationEmail, sendRoleChangeEmail } from "../lib/email.js";
 
 const router = express.Router();
 
@@ -449,21 +449,65 @@ router.patch("/users", requireAdmin, async (req, res) => {
 
     const conn = await dbConnect();
     let updatedUser = null;
+    let previousRole = null;
 
     if (conn.isMock || !mongoose.Types.ObjectId.isValid(userId)) {
       const db = getMockDb();
       const user = db.users.find((u) => u._id === userId);
       if (!user) return res.status(404).json({ error: "User not found." });
+      previousRole = user.role;
       user.role = role;
       user.updatedAt = new Date().toISOString();
       saveMockDb(db);
       updatedUser = { _id: user._id, name: user.name, email: user.email, role: user.role };
     } else {
+      const existingUser = await User.findById(userId).select("name email role");
+      if (!existingUser) return res.status(404).json({ error: "User not found." });
+      previousRole = existingUser.role;
       updatedUser = await User.findByIdAndUpdate(userId, { role }, { returnDocument: 'after' }).select("-password");
       if (!updatedUser) return res.status(404).json({ error: "User not found." });
     }
 
-    res.json({ success: true, user: updatedUser });
+    let notificationEmailSent = false;
+    let notificationEmailTo = updatedUser?.email || "";
+    let notificationEmailError = "";
+    if (previousRole !== role && updatedUser?.email) {
+      const promoted = role === "admin";
+      const title = promoted ? "Admin Access Granted" : "Admin Access Removed";
+      const message = promoted
+        ? "Your BureauAI account has been promoted to administrator. You can now access the admin panel after signing in."
+        : "Your BureauAI administrator access has been removed. Your account will continue as a regular user account.";
+      const emailResult = await sendRoleChangeEmail(updatedUser.email, updatedUser.name || "User", role);
+      notificationEmailSent = emailResult.success;
+      notificationEmailError = emailResult.success
+        ? ""
+        : (emailResult.error?.response || emailResult.error?.message || "SMTP delivery failed.");
+
+      if (conn.isMock || !mongoose.Types.ObjectId.isValid(userId)) {
+        const db = getMockDb();
+        db.notifications.push({
+          _id: "notif_" + Math.random().toString(36).substr(2, 9),
+          userId,
+          title,
+          message,
+          type: promoted ? "success" : "warning",
+          read: false,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+        saveMockDb(db);
+      } else {
+        await Notification.create({
+          userId,
+          title,
+          message,
+          type: promoted ? "success" : "warning",
+          read: false,
+        });
+      }
+    }
+
+    res.json({ success: true, user: updatedUser, notificationEmailSent, notificationEmailTo, notificationEmailError });
   } catch (err) {
     console.error("Admin PATCH User Error:", err);
     res.status(500).json({ error: "Failed to update user role." });
